@@ -1,3 +1,4 @@
+class_name Save
 extends Node
 
 ## Node that handles saving and loading user data
@@ -106,7 +107,8 @@ func edit_data(profile: String = "save", filetype: String = ".sav") -> Dictionar
 	else:
 		var thefile: FileAccess = FileAccess.open(path, FileAccess.READ)
 		if not thefile.eof_reached():
-			var almost_data = JSON.parse_string(thefile.get_line())
+			var file_content = thefile.get_as_text()
+			var almost_data = JSON.parse_string(file_content)
 			if almost_data != null:
 				data = almost_data
 	return data
@@ -152,7 +154,8 @@ func edit_data_in_folder(resuser: String, folder: String, profile: String = "sav
 	else:
 		var thefile: FileAccess = FileAccess.open(path, FileAccess.READ)
 		if not thefile.eof_reached():
-			var almost_data = JSON.parse_string(thefile.get_line())
+			var file_content = thefile.get_as_text()
+			var almost_data = JSON.parse_string(file_content)
 			if almost_data != null:
 				data = almost_data
 	return data
