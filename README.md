@@ -1,32 +1,33 @@
-# Godot Save
-Godot Save is created for new users, who need to save data, but it is easy
+# Godot Save - A simple save, load and screenshot plugin for Godot 4  
+Godot Save is an easy to use addon created to make saving and loading files easier in Godot 4.
 
-This script contains parts of Screenshot queue but modified by me, 
-but the original author is fractilegames.
+Inspired by [PersistenceNode](https://github.com/MatiasVME/Persistence) by MatiasVME and [Godot-Screenshot-Queue](https://github.com/fractilegames/godot-screenshot-queue) by fractilegames,
+this addon is designed to bring elements of both systems into one while porting the functionality to Godot 4.
 
-GitHub: https://github.com/fractilegames/godot-screenshot-queue
-
-and inspired by the project "PersistenceNode" by MatiasVME
-
-GitHub: https://github.com/MatiasVME/Persistence
-
-<h1>Usage</h1>
-<h2>Saving</h2>
-<h3>save_data(data: Dictionary, profile: String = "save", typefile: String = ".json")</h3>
+# Usage
+## Saving
+### save_data(data: Dictionary, profile: String = "save", filetype: String = ".sav") -> void
 
 ```gdscript
-var data = {"yourmom":"fat"}
-Addonsave.save_data(data,"yourmoms",".json")
+var data = {"prop":[{"val1": true}, {"val2": false}]}
+$Save.save_data(data,"filename",".json")
 ```
-<h2>Loading / Editing</h2>
-<h3>edit_data(profile: String = "save", typefile: String = ".json")</h3>
+## Loading / Editing
+### edit_data(profile: String = "save", filetype: String = ".sav") -> Dictionary
 
 ```gdscript
-var player_data = Addonsave.edit_data("player_data",".json")
+var player_data = $Save.edit_data("player_data",".json")
 ```
-<h2>Removing</h2>
-<h3>remove_data(profile: String = "save", typefile: String = ".json")</h3>
+## Deleting save data
+### remove_data(profile: String = "save", filetype: String = ".sav") -> void
 
 ```gdscript
-Addonsave.remove_data("player_data",".json")
+$Save.remove_data("player_data",".json")
 ```
+## Taking Screenshots
+### snap_screenshot(viewport: Viewport) -> void
+
+```gdscript
+$Save.snap_screenshots(get_viewport())
+```
+
