@@ -1,6 +1,8 @@
 # Godot Save - A simple save, load and screenshot plugin for Godot 4  
 Godot Save is an easy to use addon created to make saving and loading files easier in Godot 4.
 
+### Contributor <a href="https://github.com/kcfresh53" target="_blank">Purna Shrestha</a>
+
 Inspired by [PersistenceNode](https://github.com/MatiasVME/Persistence) by MatiasVME and [Godot-Screenshot-Queue](https://github.com/fractilegames/godot-screenshot-queue) by fractilegames,
 this addon is designed to bring elements of both systems into one while porting the functionality to Godot 4.
 
