@@ -38,18 +38,19 @@ Inspired by [PersistenceNode](https://github.com/MatiasVME/Persistence) and [God
 var data = {"prop":[{"val1": true}, {"val2": false}]}
 $Save.save_data(data, "filename", ".json")
 📖 Loading / Editing Data
-gdscript
-Copy code
+```
+```gdscript
 var player_data = $Save.edit_data("player_data", ".json")
 print(player_data)
+```
 🗑 Deleting Data
-gdscript
-Copy code
+```gdscript
 $Save.remove_data("player_data", ".json")
+```
 📸 Taking Screenshots
-gdscript
-Copy code
+```gdscript
 $Save.snap_screenshot(get_viewport(), "my_screenshot")
+```
 ⚙️ Configuration (Inspector)
 Setting	Type	Default	Description
 use_encryption	bool	false	Encrypt save files with AES-256.
@@ -64,9 +65,9 @@ remote_save_url	String	""	(Optional) Server endpoint for cloud sync.
 🛡 Encryption & Compression
 Enable both in the Inspector for secure, compact saves:
 
-gdscript
-Copy code
+```gdscript
 const AES_KEY = "my_super_secret_key"
+```
 Key is hashed into a 32-byte key internally.
 
 Compression uses ZipPacker/ZipReader to keep saves small.
@@ -75,9 +76,10 @@ Must be enabled both on save and load.
 
 🌐 Cloud Sync Example
 gdscript
-Copy code
+```
 await $Save.upload_save("profile1")
 await $Save.download_save("profile1")
+```
 This lets you back up or restore player data from a server endpoint.
 
 🖼 Screenshots
