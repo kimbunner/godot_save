@@ -1,246 +1,424 @@
+# Save.gd
 class_name Save
 extends Node
 
-## Node that handles saving and loading user data
-##
-## The save node can create and store data in the specified data format.
-## The node also handles saving screenshots.
-##
-## @tutorial(Project Github): https://github.com/kimbunner/godot_save
-
+signal save_completed(profile: String)
+signal load_completed(profile: String, data: Dictionary)
+signal save_failed(profile: String, reason: String)
 
 const MAX_QUEUE_LENGTH: int = 4
+@onready var AES_KEY: PackedByteArray = "supersecretkey123".to_utf8_buffer()
+const SAVE_VERSION: int = 1
 
-## Toggles the use of "user://" and "res://"
-## [codeblock]
-## true = "res://"
-## false = "user://"
-## [/codeblock]
 @export var data_in_folder: bool = false
-
-## Folder name for saving data
 @export var folder_name: String = "save"
-
-## Determines if file debug statements are printed
-## if false, this script will not print
 @export var print_in_terminal: bool = true
 
-## Toggles the use of "user://" and "res://"
-## [codeblock]
-## true = "res://"
-## false = "user://"
-## [/codeblock]
 @export var screenshot_in_folder: bool = false
-
-## Folder name for saving screenshots
 @export var screenshot_folder_name: String = "screenshots"
-
-## Determines if screenshot debug statements are printed
-## if false, this script will not print
 @export var screenshot_print_in_terminal: bool = true
+@export var screenshot_max_count: int = 50
 
-# Internal variables
+@export var use_encryption: bool = false
+@export var use_compression: bool = false
+@export var keep_backups: bool = true
+@export var backup_limit: int = 3
+
+@export var auto_save_interval: float = 0.0 ## Seconds (0 = disabled)
+@export var auto_load_on_ready: bool = true
+@export var remote_save_url: String = "" ## For cloud sync
+@export var file_format: String = "json" ## "json", "txt", "bin"
+
 var _res_user: String = "user://"
 var _s_res_user: String = "user://"
-
-# Thread and mutex for handling screenshot saving
 var _thread: Thread
 var _mutex: Mutex
 var _queue: Array = []
-
+var _autosave_timer: Timer
 
 func _ready() -> void:
-	# Set the path for data saving
 	_res_user = "res://" if data_in_folder else "user://"
-	
-	# Set the path for screenshot saving
 	_s_res_user = "res://" if screenshot_in_folder else "user://"
-	
 	_thread = Thread.new()
 	_mutex = Mutex.new()
 
+	if auto_load_on_ready:
+		# attempt to load default profile and emit load_completed
+		var loaded := edit_data("default")
+		emit_signal("load_completed", "default", loaded)
 
-## Creates a folder if it doesn't exist. [br]
-## [param resuser] The base path ("user://" or "res://"). [br]
-## [param folder] The name of the folder to create.
+	if auto_save_interval > 0:
+		_autosave_timer = Timer.new()
+		_autosave_timer.wait_time = auto_save_interval
+		_autosave_timer.autostart = true
+		_autosave_timer.one_shot = false
+		_autosave_timer.timeout.connect(_on_autosave)
+		add_child(_autosave_timer)
+
+
+func _log(msg: String, is_screenshot: bool = false) -> void:
+	if (is_screenshot and screenshot_print_in_terminal) or (not is_screenshot and print_in_terminal):
+		print(msg)
+
+
 func create_folder(resuser: String, folder: String) -> void:
-	var path: DirAccess = DirAccess.open(resuser)
-	if not path.dir_exists_absolute(resuser + folder):
-		path.make_dir_absolute(resuser + folder)
-		if print_in_terminal:
-			print("Making directory: " + resuser + folder)
+	var dir := DirAccess.open(resuser)
+	if not dir.dir_exists_absolute(resuser + folder):
+		dir.make_dir_absolute(resuser + folder)
+		_log("Making directory: " + resuser + folder)
 
 
-## Saves data to a file. [br]
-## [param data] Dictionary containing data to save. [br]
-## [param profile] The name of the profile (default is "save"). [br]
-## [param filetype] The file extension (default is ".sav"). [br]
-func save_data(data: Dictionary, profile: String = "save", filetype: String = ".sav") -> void:
+### --- CRYPTO HELPERS (AES-256 CBC using AESContext + HashingContext) ---
+
+func _sha256(bytes: PackedByteArray) -> PackedByteArray:
+	var h := HashingContext.new()
+	h.start(HashingContext.HASH_SHA256)
+	h.update(bytes)
+	return h.finish() # 32 bytes
+
+
+func _pkcs7_pad(bytes: PackedByteArray, block_size: int = 16) -> PackedByteArray:
+	var pad_len := block_size - (bytes.size() % block_size)
+	if pad_len == 0:
+		pad_len = block_size
+	var out := PackedByteArray(bytes)
+	var orig := out.size()
+	out.resize(orig + pad_len)
+	for i in range(pad_len):
+		out[orig + i] = pad_len
+	return out
+
+
+func _pkcs7_unpad(bytes: PackedByteArray, block_size: int = 16) -> PackedByteArray:
+	if bytes.is_empty():
+		return bytes
+	var pad_len := int(bytes[bytes.size() - 1])
+	# basic validation to avoid crashes on corrupted data
+	if pad_len <= 0 or pad_len > block_size or pad_len > bytes.size():
+		push_error("PKCS7 unpad validation failed, returning original bytes.")
+		return bytes
+	return bytes.slice(0, bytes.size() - pad_len)
+
+
+func _encrypt(data: PackedByteArray) -> PackedByteArray:
+	if not use_encryption:
+		return data
+	# Derive 32-byte key, use first 16 bytes as IV
+	var key := _sha256(AES_KEY) # 32 bytes
+	var iv := key.slice(0, 16)
+	var aes := AESContext.new()
+	aes.start(AESContext.MODE_CBC_ENCRYPT, key, iv)
+	var input := _pkcs7_pad(data, 16)
+	var out := aes.update(input)
+	aes.finish() # just finalize, no output
+	return out
+
+
+func _decrypt(data: PackedByteArray) -> PackedByteArray:
+	if not use_encryption:
+		return data
+	var key := _sha256(AES_KEY)
+	var iv := key.slice(0, 16)
+	var aes := AESContext.new()
+	aes.start(AESContext.MODE_CBC_DECRYPT, key, iv)
+	var out := aes.update(data)
+	aes.finish()
+	out = _pkcs7_unpad(out, 16)
+	return out
+
+
+### --- COMPRESSION HELPERS ---
+func _compress(data: PackedByteArray) -> PackedByteArray:
+	if not use_compression:
+		return data
+
+	var temp_path := "user://temp_compress.zip"
+
+	# --- Write ZIP ---
+	var zp := ZIPPacker.new()
+	if zp.open(temp_path) != OK:
+		push_error("Failed to open temp ZIP file for compression.")
+		return data
+
+	zp.start_file("data.bin")
+	zp.write_file(data)
+	zp.close()
+
+	# --- Read back compressed data ---
+	var compressed := FileAccess.get_file_as_bytes(temp_path)
+
+	# --- Cleanup temp file ---
+	DirAccess.remove_absolute(temp_path)
+
+	return compressed
+
+
+func _decompress(data: PackedByteArray) -> PackedByteArray:
+	if not use_compression:
+		return data
+
+	# Write ZIP to temp file first
+	var temp_path := "user://temp_decompress.zip"
+	var f := FileAccess.open(temp_path, FileAccess.WRITE)
+	if f == null:
+		push_error("Failed to write temp ZIP file for decompression.")
+		return data
+	f.store_buffer(data)
+	f.close()
+
+	# Read contents using ZIPReader
+	var zr := ZIPReader.new()
+	if zr.open(temp_path) != OK:
+		push_error("Failed to open ZIP for decompression.")
+		return data
+
+	var files := zr.get_files()
+	if files.size() == 0:
+		push_error("No files found in ZIP, returning original data.")
+		return data
+
+	var decompressed := zr.read_file(files[0])
+	zr.close()
+
+	DirAccess.remove_absolute(temp_path)
+	return decompressed
+
+
+
+### --- SAFE FILE WRITE HELPER ---
+
+func _safe_write(path: String, bytes: PackedByteArray) -> bool:
+	var temp_path := path + ".tmp"
+	var f := FileAccess.open(temp_path, FileAccess.WRITE)
+	if f == null:
+		return false
+	f.store_buffer(bytes)
+	f.close()
+	# remove original if exists, then rename temp -> final
+	if FileAccess.file_exists(path):
+		DirAccess.remove_absolute(path)
+	# rename: DirAccess.rename_absolute requires full paths existing; use rename if possible
+	DirAccess.rename_absolute(temp_path, path)
+	return true
+
+
+### --- SAVE / LOAD ---
+
+func save_data(data: Dictionary, profile: String = "save", filetype: String = ".sav", async: bool = false) -> void:
 	create_folder(_res_user, folder_name)
-	
-	if profile == "":
-		profile = "save"
-	
-	var thefile: FileAccess = FileAccess.open(_res_user + folder_name + "/" + profile + filetype, FileAccess.WRITE)
-	thefile.store_line(JSON.stringify(data))
-	thefile.close()
-	
-	if print_in_terminal:
-		print("Saved: " + str(data))
+	if profile == "": profile = "save"
+
+	var path := _res_user + folder_name + "/" + profile + filetype
+
+	# Backup rotation
+	if keep_backups and FileAccess.file_exists(path):
+		# rotate bakN -> bakN+1
+		for i in range(backup_limit, 1, -1):
+			var old_backup := path + ".bak" + str(i - 1)
+			var new_backup := path + ".bak" + str(i)
+			if FileAccess.file_exists(old_backup):
+				DirAccess.rename_absolute(old_backup, new_backup)
+		# copy current to .bak1
+		DirAccess.copy_absolute(path, path + ".bak1")
+
+	# Add metadata
+	data["_meta"] = {"version": SAVE_VERSION, "timestamp": Time.get_datetime_string_from_system()}
+
+	var bytes: PackedByteArray
+	match file_format:
+		"json":
+			bytes = JSON.stringify(data).to_utf8_buffer()
+		"txt":
+			bytes = str(data).to_utf8_buffer()
+		"bin":
+			bytes = var_to_bytes(data)
+
+	# compress -> encrypt -> write
+	bytes = _compress(bytes)
+	bytes = _encrypt(bytes)
+
+	var ok := _safe_write(path, bytes)
+	if not ok:
+		emit_signal("save_failed", profile, "Cannot write file")
+		return
+
+	emit_signal("save_completed", profile)
+	_log("Saved profile: " + profile)
 
 
-## Loads data from a file. [br]
-## [param profile] The name of the profile (default is "save"). [br]
-## [param filetype] The file extension (default is ".sav"). [br]
-## @return Dictionary containing loaded data.
 func edit_data(profile: String = "save", filetype: String = ".sav") -> Dictionary:
 	create_folder(_res_user, folder_name)
-	
-	var data: Dictionary = {}
-	if profile == "":
-		profile = "save"
-	
-	var path: String = _res_user + folder_name + "/" + profile + filetype
+	if profile == "": profile = "save"
+
+	var path := _res_user + folder_name + "/" + profile + filetype
 	if not FileAccess.file_exists(path):
-		if print_in_terminal:
-			print("The file doesn't exist yet, returning empty dictionary")
-	else:
-		var thefile: FileAccess = FileAccess.open(path, FileAccess.READ)
-		if not thefile.eof_reached():
-			var file_content = thefile.get_as_text()
-			var almost_data = JSON.parse_string(file_content)
-			if almost_data != null:
-				data = almost_data
+		_log("File not found, returning empty dictionary")
+		return {}
+
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		_log("Unable to open file for reading")
+		return {}
+	var bytes := f.get_buffer(f.get_length())
+	f.close()
+
+	# decrypt -> decompress -> parse
+	bytes = _decrypt(bytes)
+	bytes = _decompress(bytes)
+
+	var data: Dictionary = {}
+	match file_format:
+		"json":
+			var parsed = JSON.parse_string(bytes.get_string_from_utf8())
+			# JSON.parse_string returns a Variant (Dictionary or Array or Error) depending on content
+			if typeof(parsed) == TYPE_DICTIONARY:
+				data = parsed
+			else:
+				# JSON.parse_string sometimes returns a result object; attempt safe conversion:
+				# if parse failed, fallback to empty dict
+				data = parsed if typeof(parsed) == TYPE_DICTIONARY else {}
+		"txt":
+			data = {"raw": bytes.get_string_from_utf8()}
+		"bin":
+			var v = bytes_to_var(bytes)
+			if typeof(v) == TYPE_DICTIONARY:
+				data = v
+			else:
+				data = {}
+
+	if typeof(data) != TYPE_DICTIONARY:
+		emit_signal("load_completed", profile, {})
+		return {}
+
+	emit_signal("load_completed", profile, data)
 	return data
 
 
-## Saves data to a specific folder. [br]
-## [param data] Dictionary containing data to save. [br]
-## [param resuser] The base path ("user://" or "res://"). [br]
-## [param folder] The name of the folder to save the data. [br]
-## [param profile] The name of the profile (default is "save"). [br]
-## [param filetype] The file extension (default is ".sav").
-func save_data_in_folder(data: Dictionary, resuser: String, folder: String, profile: String = "save", filetype: String = ".sav") -> void:
-	create_folder(resuser, folder)
-	
-	if profile == "":
-		profile = "save"
-	
-	var thefile: FileAccess = FileAccess.open(resuser + folder + "/" + profile + filetype, FileAccess.WRITE)
-	thefile.store_line(JSON.stringify(data))
-	thefile.close()
-	
-	if print_in_terminal:
-		print("Saved: " + str(data))
+### --- SLOT MANAGEMENT ---
+
+func list_profiles(filetype: String = ".sav") -> Array:
+	var profiles := []
+	var dir := DirAccess.open(_res_user + folder_name)
+	if dir == null:
+		return profiles
+	for file in dir.get_files():
+		if file.ends_with(filetype):
+			profiles.append(file)
+	return profiles
 
 
-## Loads data from a specific folder. [br]
-## [param resuser] The base path ("user://" or "res://"). [br]
-## [param folder] The name of the folder to load the data from. [br]
-## [param profile] The name of the profile (default is "save"). [br]
-## [param filetype] The file extension (default is ".sav"). [br]
-## @return Dictionary containing loaded data
-func edit_data_in_folder(resuser: String, folder: String, profile: String = "save", filetype: String = ".sav") -> Dictionary:
-	create_folder(resuser, folder)
-	
-	var data: Dictionary = {}
-	if profile == "":
-		profile = "save"
-	
-	var path: String = resuser + folder + "/" + profile + filetype
+func delete_all_profiles(filetype: String = ".sav") -> void:
+	var dir := DirAccess.open(_res_user + folder_name)
+	if dir == null:
+		return
+	for file in dir.get_files():
+		if file.ends_with(filetype):
+			dir.remove(file)
+
+
+### --- CLOUD SYNC (basic) ---
+
+# NOTE: This is a minimal upload/download example. For production, add authentication & error handling.
+func upload_save(profile: String = "save", filetype: String = ".sav") -> void:
+	if remote_save_url == "":
+		_log("No remote_save_url set, skipping upload")
+		return
+	var path := _res_user + folder_name + "/" + profile + filetype
 	if not FileAccess.file_exists(path):
-		if print_in_terminal:
-			print("The file doesn't exist yet, returning empty dictionary")
-	else:
-		var thefile: FileAccess = FileAccess.open(path, FileAccess.READ)
-		if not thefile.eof_reached():
-			var file_content = thefile.get_as_text()
-			var almost_data = JSON.parse_string(file_content)
-			if almost_data != null:
-				data = almost_data
-	return data
+		_log("No file to upload")
+		return
+
+	var f := FileAccess.open(path, FileAccess.READ)
+	var bytes := f.get_buffer(f.get_length())
+	f.close()
+
+	var http := HTTPRequest.new()
+	add_child(http)
+	http.connect("request_completed", Callable(self, "_on_upload_completed"), ConnectFlags.CONNECT_ONE_SHOT)
+	http.request(remote_save_url, [], HTTPClient.METHOD_POST, bytes_to_var(bytes))
 
 
-## Removes a data file. [br]
-## [param profile] The name of the profile (default is "save"). [br]
-## [param filetype] The file extension (default is ".sav").
-func remove_data(profile: String = "save", filetype: String = ".sav") -> void:
-	var path: String = _res_user + folder_name + "/" + profile + filetype
-	DirAccess.remove_absolute(path)
-	if print_in_terminal:
-		print(path + " removed")
+func _on_upload_completed(result, response_code, headers, body) -> void:
+	_log("Upload completed: code=" + str(response_code))
 
 
-## Removes a data file from a specific folder. [br]
-## [param resuser] The base path ("user://" or "res://").[br]
-## [param folder] The name of the folder to remove the data from. [br]
-## [param profile] The name of the profile (default is "save"). [br]
-## [param filetype] The file extension (default is ".sav").
-func remove_data_in_folder(resuser: String, folder: String, profile: String = "save", filetype: String = ".sav") -> void:
-	var path: String = resuser + folder + "/" + profile + filetype
-	DirAccess.remove_absolute(path)
-	if print_in_terminal:
-		print(path + " removed")
+func download_save(profile: String = "save", filetype: String = ".sav") -> void:
+	if remote_save_url == "":
+		_log("No remote_save_url set, skipping download")
+		return
 
-func _exit_tree() -> void:
-	# Ensure the thread is finished before exiting
-	if _thread.is_alive():
-		_thread.wait_to_finish()
+	var http := HTTPRequest.new()
+	add_child(http)
+	http.connect("request_completed", Callable(self, "_on_download_completed").bind(profile, filetype), ConnectFlags.CONNECT_ONE_SHOT)
+	http.request(remote_save_url, [], HTTPClient.METHOD_GET)
 
 
-## Takes a screenshot and saves it. [br]
-## [param viewport] The viewport from which the screenshot is taken.
-func snap_screenshot(viewport: Viewport) -> void:
+func _on_download_completed(profile: String, filetype: String, result, response_code, headers, body) -> void:
+	if response_code != 200:
+		_log("Download failed, code: " + str(response_code))
+		return
+	var path := _res_user + folder_name + "/" + profile + filetype
+	_safe_write(path, body)
+	_log("Downloaded save for profile: " + profile)
+
+
+### --- AUTOSAVE ---
+
+func _on_autosave() -> void:
+	var autosave_data := get_tree().get_root().get_meta("autosave_data", {})
+	save_data(autosave_data, "autosave")
+
+
+### --- SCREENSHOT QUEUE (kept from earlier versions) ---
+
+func snap_screenshot(viewport: Viewport, custom_name: String = "") -> void:
 	create_folder(_s_res_user, screenshot_folder_name)
-	
-	var dt: Dictionary = Time.get_datetime_dict_from_system()
-	var timestamp: String = "%04d%02d%02d%02d%02d%02d" % [dt["year"], dt["month"], dt["day"], dt["hour"], dt["minute"], dt["second"]]
-	
+	var dt := Time.get_datetime_dict_from_system()
+	var timestamp := "%04d%02d%02d_%02d%02d%02d" % [dt["year"], dt["month"], dt["day"], dt["hour"], dt["minute"], dt["second"]]
+	var filename := custom_name if custom_name != "" else "screenshot-" + timestamp
 	var image: Image = viewport.get_texture().get_image()
-	
-	screenshot_save(image, _s_res_user + screenshot_folder_name + "/screenshot-" + timestamp + ".png")
+	screenshot_save(image, _s_res_user + screenshot_folder_name + "/" + filename + ".png")
+	_clean_screenshot_folder()
 
 
-## Saves a screenshot. [br]
-## [param image] The image to be saved. [br]
-## [param path] The path where the image will be saved.
+func _clean_screenshot_folder() -> void:
+	if screenshot_max_count <= 0:
+		return
+	var dir := DirAccess.open(_s_res_user + screenshot_folder_name)
+	if dir == null:
+		return
+	var files := dir.get_files()
+	if files.size() > screenshot_max_count:
+		files.sort() # alphabetical => oldest first if timestamped like above
+		for i in range(files.size() - screenshot_max_count):
+			dir.remove(files[i])
+
+
 func screenshot_save(image: Image, path: String) -> void:
 	_mutex.lock()
-	
 	if _queue.size() < MAX_QUEUE_LENGTH:
 		_queue.push_back({"image": image, "path": path})
 	else:
-		if screenshot_print_in_terminal:
-			print("Screenshot queue overflow")
-	
+		_log("Screenshot queue overflow", true)
+
 	if _queue.size() == 1:
 		if _thread.is_alive():
 			_thread.wait_to_finish()
-		_thread.start(worker_function.bind(1))  # Pass the correct argument
-	
+		_thread.start(worker_function.bind(1))
 	_mutex.unlock()
 
 
-## Worker function for saving screenshots in a separate thread.
-## [param _userdata] Unused parameter for thread callable.
 func worker_function(_userdata) -> void:
 	_mutex.try_lock()
 	while not _queue.is_empty():
-		var item: Dictionary = _queue.front()
+		var item := _queue.front()
 		_mutex.unlock()
-		
-		call_deferred("_save_screenshot", item)  # Use call_deferred to call the function safely
-		
+		call_deferred("_save_screenshot", item)
 		_mutex.lock()
 		_queue.pop_front()
-	
 	_mutex.unlock()
 
 
-## Actual function to save the screenshot called with call_deferred.
-## [param item] Dictionary containing image and path.
 func _save_screenshot(item: Dictionary) -> void:
-	if screenshot_print_in_terminal:
-		print("Saving screenshot to " + item["path"])
-	
+	_log("Saving screenshot to " + item["path"], true)
 	item["image"].save_png(item["path"])
