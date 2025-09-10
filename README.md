@@ -94,7 +94,8 @@ MIT License – free to use, modify, and distribute.
 See LICENSE for details.
 
 🙌 Credits
-Author: Purna Shrestha
+Author: Kimbunner
+Contributor: Purna Shrestha
 
 Inspired by:
 
