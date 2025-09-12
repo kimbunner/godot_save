@@ -1,10 +1,10 @@
-# 📦 Godot Save – Secure Save, Load, and Screenshot Plugin for Godot 4
+# 📦 Addon Save – Secure Save, Load, and Screenshot Plugin for Godot 4
 
 ![Godot](https://img.shields.io/badge/Godot-4.x-blue?style=for-the-badge)
 ![License](https://img.shields.io/github/license/kimbunner/godot-save?style=for-the-badge)
 ![Status](https://img.shields.io/badge/status-stable-brightgreen?style=for-the-badge)
 
-Godot Save is an easy-to-use addon for Godot 4 that combines **saving/loading, encryption, compression, backups, auto-save, and screenshot management** in one place.
+Addon Save is an easy-to-use addon for Godot 4 that combines **saving/loading, encryption, compression, backups, auto-save, and screenshot management** in one place.
 
 Inspired by [PersistenceNode](https://github.com/MatiasVME/Persistence) and [Godot-Screenshot-Queue](https://github.com/fractilegames/godot-screenshot-queue), this addon brings their best features together with a modern Godot 4 implementation.
 
