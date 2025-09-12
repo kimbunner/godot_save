@@ -26,7 +26,7 @@ Inspired by [PersistenceNode](https://github.com/MatiasVME/Persistence) and [God
 ## 🚀 Installation
 
 1. Download or clone this repository.
-2. Copy the `addons/godot-save/` folder into your project.
+2. Copy the `addons/GodotSavesAddon` folder into your project.
 3. Enable the addon in **Project → Project Settings → Plugins**.
 
 ---
