@@ -12,6 +12,7 @@ const SAVE_VERSION: int = 1
 
 @export var data_in_folder: bool = false
 @export var folder_name: String = "save"
+@export var save_name: String = ""
 @export var print_in_terminal: bool = true
 
 @export var screenshot_in_folder: bool = false
@@ -42,9 +43,9 @@ func _ready() -> void:
 	_thread = Thread.new()
 	_mutex = Mutex.new()
 
-	if auto_load_on_ready:
+	if auto_load_on_ready and save_name != "":
 		# attempt to load default profile and emit load_completed
-		var loaded := edit_data("default")
+		var loaded := edit_data(save_name)
 		emit_signal("load_completed", "default", loaded)
 
 	if auto_save_interval > 0:
@@ -209,6 +210,7 @@ func save_data(data: Dictionary, profile: String = "save", filetype: String = ".
 	if profile == "": profile = "save"
 
 	var path := _res_user + folder_name + "/" + profile + filetype
+	print(path)
 
 	# Backup rotation
 	if keep_backups and FileAccess.file_exists(path):
@@ -251,6 +253,7 @@ func edit_data(profile: String = "save", filetype: String = ".sav") -> Dictionar
 	if profile == "": profile = "save"
 
 	var path := _res_user + folder_name + "/" + profile + filetype
+	print(path)
 	if not FileAccess.file_exists(path):
 		_log("File not found, returning empty dictionary")
 		return {}
