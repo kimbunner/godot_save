@@ -1,7 +1,7 @@
 # 📦 Addon Save – Secure Save, Load, and Screenshot Plugin for Godot 4
 
 ![Godot](https://img.shields.io/badge/Godot-4.x-blue?style=for-the-badge)
-![License](https://img.shields.io/github/license/kimbunner/godot-save?style=for-the-badge)
+![License](https://img.shields.io/github/license/kimbunner/godot_save?style=for-the-badge)
 ![Status](https://img.shields.io/badge/status-stable-brightgreen?style=for-the-badge)
 
 Addon Save is an easy-to-use addon for Godot 4 that combines **saving/loading, encryption, compression, backups, auto-save, and screenshot management** in one place.
