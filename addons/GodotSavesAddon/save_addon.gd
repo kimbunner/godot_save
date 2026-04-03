@@ -5,10 +5,14 @@ extends Node
 signal save_completed(profile: String)
 signal load_completed(profile: String, data: Dictionary)
 signal save_failed(profile: String, reason: String)
+signal load_failed(profile: String, reason: String)
+signal migration_applied(profile: String, from_version: int, to_version: int)
 
 const MAX_QUEUE_LENGTH: int = 4
+## Bump when you add new required fields; override ``migrate_save_data`` for custom steps.
+const CURRENT_SAVE_VERSION: int = 2
+
 @onready var AES_KEY: PackedByteArray = "supersecretkey123".to_utf8_buffer()
-const SAVE_VERSION: int = 1
 
 @export var data_in_folder: bool = false
 @export var folder_name: String = "save"
@@ -25,10 +29,19 @@ const SAVE_VERSION: int = 1
 @export var keep_backups: bool = true
 @export var backup_limit: int = 3
 
+## SHA-256 over serialized payload (before compression/encryption). Helps detect manual edits.
+@export var use_integrity_checksum: bool = true
+## If true, ``edit_data`` returns ``{}`` when the checksum does not match.
+@export var strict_integrity: bool = true
+
 @export var auto_save_interval: float = 0.0 ## Seconds (0 = disabled)
 @export var auto_load_on_ready: bool = true
 @export var remote_save_url: String = "" ## For cloud sync
 @export var file_format: String = "json" ## "json", "txt", "bin"
+
+## Shallow/recursive defaults merged when a loaded save is older than ``CURRENT_SAVE_VERSION``.
+## For complex migrations, override ``migrate_save_data`` instead.
+@export var default_values_for_new_keys: Dictionary = {}
 
 var _res_user: String = "user://"
 var _s_res_user: String = "user://"
@@ -37,14 +50,17 @@ var _mutex: Mutex
 var _queue: Array = []
 var _autosave_timer: Timer
 
+var _save_thread: Thread
+
+
 func _ready() -> void:
 	_res_user = "res://" if data_in_folder else "user://"
 	_s_res_user = "res://" if screenshot_in_folder else "user://"
 	_thread = Thread.new()
+	_save_thread = Thread.new()
 	_mutex = Mutex.new()
 
 	if auto_load_on_ready and save_name != "":
-		# attempt to load default profile and emit load_completed
 		var loaded := edit_data(save_name)
 		emit_signal("load_completed", "default", loaded)
 
@@ -69,124 +85,61 @@ func create_folder(resuser: String, folder: String) -> void:
 		_log("Making directory: " + resuser + folder)
 
 
-### --- CRYPTO HELPERS (AES-256 CBC using AESContext + HashingContext) ---
-
-func _sha256(bytes: PackedByteArray) -> PackedByteArray:
-	var h := HashingContext.new()
-	h.start(HashingContext.HASH_SHA256)
-	h.update(bytes)
-	return h.finish() # 32 bytes
-
-
-func _pkcs7_pad(bytes: PackedByteArray, block_size: int = 16) -> PackedByteArray:
-	var pad_len := block_size - (bytes.size() % block_size)
-	if pad_len == 0:
-		pad_len = block_size
-	var out := PackedByteArray(bytes)
-	var orig := out.size()
-	out.resize(orig + pad_len)
-	for i in range(pad_len):
-		out[orig + i] = pad_len
-	return out
+## Override in a subclass for custom per-version migrations. Call ``super`` if you extend defaults.
+func migrate_save_data(data: Dictionary, from_version: int) -> Dictionary:
+	var d := data.duplicate(true)
+	if from_version < CURRENT_SAVE_VERSION and not default_values_for_new_keys.is_empty():
+		SaveCodec.deep_merge_defaults(d, default_values_for_new_keys.duplicate(true))
+	return d
 
 
-func _pkcs7_unpad(bytes: PackedByteArray, block_size: int = 16) -> PackedByteArray:
-	if bytes.is_empty():
-		return bytes
-	var pad_len := int(bytes[bytes.size() - 1])
-	# basic validation to avoid crashes on corrupted data
-	if pad_len <= 0 or pad_len > block_size or pad_len > bytes.size():
-		push_error("PKCS7 unpad validation failed, returning original bytes.")
-		return bytes
-	return bytes.slice(0, bytes.size() - pad_len)
-
-
-func _encrypt(data: PackedByteArray) -> PackedByteArray:
-	if not use_encryption:
+func _apply_schema_migrations(data: Dictionary, profile: String) -> Dictionary:
+	if typeof(data) != TYPE_DICTIONARY or data.is_empty():
 		return data
-	# Derive 32-byte key, use first 16 bytes as IV
-	var key := _sha256(AES_KEY) # 32 bytes
-	var iv := key.slice(0, 16)
-	var aes := AESContext.new()
-	aes.start(AESContext.MODE_CBC_ENCRYPT, key, iv)
-	var input := _pkcs7_pad(data, 16)
-	var out := aes.update(input)
-	aes.finish() # just finalize, no output
-	return out
-
-
-func _decrypt(data: PackedByteArray) -> PackedByteArray:
-	if not use_encryption:
+	var meta: Variant = data.get("_meta", {})
+	var loaded_version: int = 1
+	if typeof(meta) == TYPE_DICTIONARY and meta.has("version"):
+		loaded_version = int(meta["version"])
+	if loaded_version > CURRENT_SAVE_VERSION:
+		var msg := "Save newer than game (file v%s vs game v%s)." % [str(loaded_version), str(CURRENT_SAVE_VERSION)]
+		push_warning(msg)
 		return data
-	var key := _sha256(AES_KEY)
-	var iv := key.slice(0, 16)
-	var aes := AESContext.new()
-	aes.start(AESContext.MODE_CBC_DECRYPT, key, iv)
-	var out := aes.update(data)
-	aes.finish()
-	out = _pkcs7_unpad(out, 16)
-	return out
+	if loaded_version < CURRENT_SAVE_VERSION:
+		var migrated := migrate_save_data(data, loaded_version)
+		if not migrated.has("_meta") or typeof(migrated["_meta"]) != TYPE_DICTIONARY:
+			migrated["_meta"] = {}
+		(migrated["_meta"] as Dictionary)["version"] = CURRENT_SAVE_VERSION
+		emit_signal("migration_applied", profile, loaded_version, CURRENT_SAVE_VERSION)
+		return migrated
+	return data
 
 
-### --- COMPRESSION HELPERS ---
-func _compress(data: PackedByteArray) -> PackedByteArray:
-	if not use_compression:
-		return data
-
-	var temp_path := "user://temp_compress.zip"
-
-	# --- Write ZIP ---
-	var zp := ZIPPacker.new()
-	if zp.open(temp_path) != OK:
-		push_error("Failed to open temp ZIP file for compression.")
-		return data
-
-	zp.start_file("data.bin")
-	zp.write_file(data)
-	zp.close()
-
-	# --- Read back compressed data ---
-	var compressed := FileAccess.get_file_as_bytes(temp_path)
-
-	# --- Cleanup temp file ---
-	DirAccess.remove_absolute(temp_path)
-
-	return compressed
+func _aes_key_bytes() -> PackedByteArray:
+	return AES_KEY
 
 
-func _decompress(data: PackedByteArray) -> PackedByteArray:
-	if not use_compression:
-		return data
-
-	# Write ZIP to temp file first
-	var temp_path := "user://temp_decompress.zip"
-	var f := FileAccess.open(temp_path, FileAccess.WRITE)
-	if f == null:
-		push_error("Failed to write temp ZIP file for decompression.")
-		return data
-	f.store_buffer(data)
-	f.close()
-
-	# Read contents using ZIPReader
-	var zr := ZIPReader.new()
-	if zr.open(temp_path) != OK:
-		push_error("Failed to open ZIP for decompression.")
-		return data
-
-	var files := zr.get_files()
-	if files.size() == 0:
-		push_error("No files found in ZIP, returning original data.")
-		return data
-
-	var decompressed := zr.read_file(files[0])
-	zr.close()
-
-	DirAccess.remove_absolute(temp_path)
-	return decompressed
+func _encode_save_payload(data: Dictionary) -> PackedByteArray:
+	return SaveCodec.encode_buffer(
+		data,
+		file_format,
+		use_compression,
+		use_encryption,
+		_aes_key_bytes(),
+		use_integrity_checksum
+	)
 
 
+func _decode_save_bytes(bytes: PackedByteArray) -> Array:
+	return SaveCodec.decode_buffer(
+		bytes,
+		file_format,
+		use_compression,
+		use_encryption,
+		_aes_key_bytes(),
+		use_integrity_checksum,
+		not strict_integrity
+	)
 
-### --- SAFE FILE WRITE HELPER ---
 
 func _safe_write(path: String, bytes: PackedByteArray) -> bool:
 	var temp_path := path + ".tmp"
@@ -195,50 +148,51 @@ func _safe_write(path: String, bytes: PackedByteArray) -> bool:
 		return false
 	f.store_buffer(bytes)
 	f.close()
-	# remove original if exists, then rename temp -> final
 	if FileAccess.file_exists(path):
 		DirAccess.remove_absolute(path)
-	# rename: DirAccess.rename_absolute requires full paths existing; use rename if possible
 	DirAccess.rename_absolute(temp_path, path)
 	return true
 
 
-### --- SAVE / LOAD ---
-
-func save_data(data: Dictionary, profile: String = "save", filetype: String = ".sav", async: bool = false) -> void:
+func save_data(data: Dictionary, profile: String = "save", filetype: String = ".sav", async_save: bool = false) -> void:
 	create_folder(_res_user, folder_name)
-	if profile == "": profile = "save"
+	if profile == "":
+		profile = "save"
 
 	var path := _res_user + folder_name + "/" + profile + filetype
 	print(path)
 
-	# Backup rotation
 	if keep_backups and FileAccess.file_exists(path):
-		# rotate bakN -> bakN+1
 		for i in range(backup_limit, 1, -1):
 			var old_backup := path + ".bak" + str(i - 1)
 			var new_backup := path + ".bak" + str(i)
 			if FileAccess.file_exists(old_backup):
 				DirAccess.rename_absolute(old_backup, new_backup)
-		# copy current to .bak1
 		DirAccess.copy_absolute(path, path + ".bak1")
 
-	# Add metadata
-	data["_meta"] = {"version": SAVE_VERSION, "timestamp": Time.get_datetime_string_from_system()}
+	data["_meta"] = {"version": CURRENT_SAVE_VERSION, "timestamp": Time.get_datetime_string_from_system()}
 
-	var bytes: PackedByteArray
-	match file_format:
-		"json":
-			bytes = JSON.stringify(data).to_utf8_buffer()
-		"txt":
-			bytes = str(data).to_utf8_buffer()
-		"bin":
-			bytes = var_to_bytes(data)
+	if async_save:
+		var snapshot: Dictionary = data.duplicate(true)
+		if _save_thread.is_alive():
+			_save_thread.wait_to_finish()
+		_save_thread.start(
+			_async_save_worker.bind(
+				{
+					"path": path,
+					"profile": profile,
+					"snapshot": snapshot,
+					"key": _aes_key_bytes().duplicate(),
+					"fmt": file_format,
+					"compress": use_compression,
+					"encrypt": use_encryption,
+					"checksum": use_integrity_checksum,
+				}
+			)
+		)
+		return
 
-	# compress -> encrypt -> write
-	bytes = _compress(bytes)
-	bytes = _encrypt(bytes)
-
+	var bytes := _encode_save_payload(data)
 	var ok := _safe_write(path, bytes)
 	if not ok:
 		emit_signal("save_failed", profile, "Cannot write file")
@@ -248,9 +202,33 @@ func save_data(data: Dictionary, profile: String = "save", filetype: String = ".
 	_log("Saved profile: " + profile)
 
 
+func _async_save_worker(ud: Dictionary) -> void:
+	var bytes := SaveCodec.encode_buffer(
+		ud["snapshot"],
+		ud["fmt"],
+		ud["compress"],
+		ud["encrypt"],
+		ud["key"],
+		ud["checksum"]
+	)
+	call_deferred("_async_save_finish", ud["path"], ud["profile"], bytes)
+
+
+func _async_save_finish(path: String, profile: String, bytes: PackedByteArray) -> void:
+	if _save_thread.is_alive():
+		_save_thread.wait_to_finish()
+	var ok := _safe_write(path, bytes)
+	if not ok:
+		emit_signal("save_failed", profile, "Cannot write file (async)")
+	else:
+		emit_signal("save_completed", profile)
+		_log("Saved profile (async): " + profile)
+
+
 func edit_data(profile: String = "save", filetype: String = ".sav") -> Dictionary:
 	create_folder(_res_user, folder_name)
-	if profile == "": profile = "save"
+	if profile == "":
+		profile = "save"
 
 	var path := _res_user + folder_name + "/" + profile + filetype
 	print(path)
@@ -261,43 +239,23 @@ func edit_data(profile: String = "save", filetype: String = ".sav") -> Dictionar
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
 		_log("Unable to open file for reading")
+		emit_signal("load_failed", profile, "Cannot open file")
 		return {}
 	var bytes := f.get_buffer(f.get_length())
 	f.close()
 
-	# decrypt -> decompress -> parse
-	bytes = _decrypt(bytes)
-	bytes = _decompress(bytes)
-
-	var data: Dictionary = {}
-	match file_format:
-		"json":
-			var parsed = JSON.parse_string(bytes.get_string_from_utf8())
-			# JSON.parse_string returns a Variant (Dictionary or Array or Error) depending on content
-			if typeof(parsed) == TYPE_DICTIONARY:
-				data = parsed
-			else:
-				# JSON.parse_string sometimes returns a result object; attempt safe conversion:
-				# if parse failed, fallback to empty dict
-				data = parsed if typeof(parsed) == TYPE_DICTIONARY else {}
-		"txt":
-			data = {"raw": bytes.get_string_from_utf8()}
-		"bin":
-			var v = bytes_to_var(bytes)
-			if typeof(v) == TYPE_DICTIONARY:
-				data = v
-			else:
-				data = {}
-
-	if typeof(data) != TYPE_DICTIONARY:
+	var dec := _decode_save_bytes(bytes)
+	if not dec[0]:
+		emit_signal("load_failed", profile, "Integrity check failed")
 		emit_signal("load_completed", profile, {})
 		return {}
+
+	var data: Dictionary = dec[1]
+	data = _apply_schema_migrations(data, profile)
 
 	emit_signal("load_completed", profile, data)
 	return data
 
-
-### --- SLOT MANAGEMENT ---
 
 func list_profiles(filetype: String = ".sav") -> Array:
 	var profiles := []
@@ -319,9 +277,6 @@ func delete_all_profiles(filetype: String = ".sav") -> void:
 			dir.remove(file)
 
 
-### --- CLOUD SYNC (basic) ---
-
-# NOTE: This is a minimal upload/download example. For production, add authentication & error handling.
 func upload_save(profile: String = "save", filetype: String = ".sav") -> void:
 	if remote_save_url == "":
 		_log("No remote_save_url set, skipping upload")
@@ -332,13 +287,13 @@ func upload_save(profile: String = "save", filetype: String = ".sav") -> void:
 		return
 
 	var f := FileAccess.open(path, FileAccess.READ)
-	var bytes := f.get_buffer(f.get_length())
+	var file_bytes := f.get_buffer(f.get_length())
 	f.close()
 
 	var http := HTTPRequest.new()
 	add_child(http)
 	http.connect("request_completed", Callable(self, "_on_upload_completed"), ConnectFlags.CONNECT_ONE_SHOT)
-	http.request(remote_save_url, [], HTTPClient.METHOD_POST, bytes_to_var(bytes))
+	http.request_raw(remote_save_url, PackedStringArray(), HTTPClient.METHOD_POST, file_bytes)
 
 
 func _on_upload_completed(result, response_code, headers, body) -> void:
@@ -365,14 +320,10 @@ func _on_download_completed(profile: String, filetype: String, result, response_
 	_log("Downloaded save for profile: " + profile)
 
 
-### --- AUTOSAVE ---
-
 func _on_autosave() -> void:
 	var autosave_data := get_tree().get_root().get_meta("autosave_data", {})
 	save_data(autosave_data, "autosave")
 
-
-### --- SCREENSHOT QUEUE (kept from earlier versions) ---
 
 func snap_screenshot(viewport: Viewport, custom_name: String = "") -> void:
 	create_folder(_s_res_user, screenshot_folder_name)
@@ -392,7 +343,7 @@ func _clean_screenshot_folder() -> void:
 		return
 	var files := dir.get_files()
 	if files.size() > screenshot_max_count:
-		files.sort() # alphabetical => oldest first if timestamped like above
+		files.sort()
 		for i in range(files.size() - screenshot_max_count):
 			dir.remove(files[i])
 
