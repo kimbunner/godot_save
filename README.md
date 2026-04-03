@@ -37,32 +37,34 @@ Inspired by [PersistenceNode](https://github.com/MatiasVME/Persistence) and [God
 ```gdscript
 var data = {"prop":[{"val1": true}, {"val2": false}]}
 $Save.save_data(data, "filename", ".json")
-📖 Loading / Editing Data
 ```
+### 📖 Loading / Editing Data
 ```gdscript
 var player_data = $Save.edit_data("player_data", ".json")
 print(player_data)
 ```
-🗑 Deleting Data
+### 🗑 Deleting Data
 ```gdscript
 $Save.remove_data("player_data", ".json")
 ```
-📸 Taking Screenshots
+### 📸 Taking Screenshots
 ```gdscript
 $Save.snap_screenshot(get_viewport(), "my_screenshot")
 ```
-⚙️ Configuration (Inspector)
-Setting	Type	Default	Description
-use_encryption	bool	false	Encrypt save files with AES-256.
-use_compression	bool	false	Compress save files using ZIP.
-keep_backups	bool	true	Keep rotating .bak files.
-backup_limit	int	3	Max number of backup versions to keep.
-use_auto_save	bool	false	Automatically save after a set interval.
-auto_save_interval	float	60.0	Interval in seconds for auto-save.
-screenshot_max_count	int	10	Maximum screenshots to keep before rotating.
-remote_save_url	String	""	(Optional) Server endpoint for cloud sync.
+### ⚙️ Configuration (Inspector)
+## Configuration Settings
+| Setting | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `use_encryption` | bool | `false` | Encrypt save files with AES-256. |
+| `use_compression` | bool | `false` | Compress save files using ZIP. |
+| `keep_backups` | bool | `true` | Keep rotating .bak files. |
+| `backup_limit` | int | `3` | Max number of backup versions to keep. |
+| `use_auto_save` | bool | `false` | Automatically save after a set interval. |
+| `auto_save_interval` | float | `60.0` | Interval in seconds for auto-save. |
+| `screenshot_max_count` | int | `10` | Maximum screenshots to keep before rotating. |
+| `remote_save_url` | String | `""` | (Optional) Server endpoint for cloud sync. |
 
-🛡 Encryption & Compression
+### 🛡 Encryption & Compression
 Enable both in the Inspector for secure, compact saves:
 
 ```gdscript
@@ -74,31 +76,29 @@ Compression uses ZipPacker/ZipReader to keep saves small.
 
 Must be enabled both on save and load.
 
-🌐 Cloud Sync Example
-gdscript
+### 🌐 Cloud Sync Example
 ```
 await $Save.upload_save("profile1")
 await $Save.download_save("profile1")
 ```
 This lets you back up or restore player data from a server endpoint.
 
-🖼 Screenshots
+### 🖼 Screenshots
 Stored in user://screenshots/
 
 Automatically rotates oldest screenshots if limit is reached
 
 Uses background threads to avoid frame stutter
 
-📜 License
+## 📜 License
 MIT License – free to use, modify, and distribute.
 See LICENSE for details.
 
-🙌 Credits
+## 🙌 Credits
 Author: Kimbunner
 Contributor: Purna Shrestha
 
 Inspired by:
 
 PersistenceNode
-
 Godot-Screenshot-Queue
