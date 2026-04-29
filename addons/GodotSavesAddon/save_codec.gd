@@ -103,16 +103,56 @@ static func decompress_zip_single(data: PackedByteArray) -> PackedByteArray:
 	return decompressed
 
 
+static func _sort_dict_recursive(d: Variant) -> Variant:
+	if typeof(d) == TYPE_DICTIONARY:
+		var sorted = {}
+		var keys = (d as Dictionary).keys()
+		keys.sort_custom(func(a, b): return str(a) < str(b))
+		for k in keys:
+			sorted[k] = _sort_dict_recursive((d as Dictionary)[k])
+		return sorted
+	elif typeof(d) == TYPE_ARRAY:
+		var result = []
+		for item in (d as Array):
+			result.append(_sort_dict_recursive(item))
+		return result
+	else:
+		return d
+
+
 static func serialize_dict(data: Dictionary, file_format: String) -> PackedByteArray:
 	match file_format:
 		"json":
-			return JSON.stringify(data).to_utf8_buffer()
+			var sorted_data = _sort_dict_recursive(data) as Dictionary
+			return JSON.stringify(sorted_data).to_utf8_buffer()
 		"txt":
 			return str(data).to_utf8_buffer()
 		"bin":
 			return var_to_bytes(data)
 		_:
-			return JSON.stringify(data).to_utf8_buffer()
+			var sorted_data = _sort_dict_recursive(data) as Dictionary
+			return JSON.stringify(sorted_data).to_utf8_buffer()
+
+
+static func _normalize_numbers(d: Variant) -> Variant:
+	if typeof(d) == TYPE_DICTIONARY:
+		var result = {}
+		for k in (d as Dictionary).keys():
+			var v = (d as Dictionary)[k]
+			result[k] = _normalize_numbers(v)
+		return result
+	elif typeof(d) == TYPE_ARRAY:
+		var result = []
+		for item in (d as Array):
+			result.append(_normalize_numbers(item))
+		return result
+	elif typeof(d) == TYPE_FLOAT:
+		var f = d as float
+		if f == floor(f):
+			return int(f)
+		return f
+	else:
+		return d
 
 
 static func deserialize_dict(bytes: PackedByteArray, file_format: String) -> Dictionary:
@@ -120,7 +160,7 @@ static func deserialize_dict(bytes: PackedByteArray, file_format: String) -> Dic
 		"json":
 			var parsed = JSON.parse_string(bytes.get_string_from_utf8())
 			if typeof(parsed) == TYPE_DICTIONARY:
-				return parsed
+				return _normalize_numbers(parsed) as Dictionary
 			return {}
 		"txt":
 			return {"raw": bytes.get_string_from_utf8()}

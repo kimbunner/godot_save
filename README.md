@@ -10,6 +10,12 @@ Inspired by [PersistenceNode](https://github.com/MatiasVME/Persistence) and [God
 
 ---
 
+## 📚 Documentation Index
+
+[DOCS](docs/README.md)
+
+---
+
 ## ✨ Features
 
 ✅ **Save & Load** data in `.sav`, `.json`, or `.txt`  
@@ -19,7 +25,8 @@ Inspired by [PersistenceNode](https://github.com/MatiasVME/Persistence) and [God
 ✅ **Auto-Save** timer support  
 ✅ **Screenshot Queue** (non-blocking)  
 ✅ **Safe Writes** (temp + rename system to prevent corruption)  
-✅ **Cloud Sync Support** (upload/download saves from your server)
+✅ **Cloud Sync Support** (upload/download saves from your server)  
+✅ **BeatAC compatibility** with export/import helpers for external tools
 
 ---
 
@@ -83,7 +90,14 @@ await $Save.download_save("profile1")
 ```
 This lets you back up or restore player data from a server endpoint.
 
-### 🖼 Screenshots
+### � BeatAC Export Example
+```gdscript
+# Export a decoded save to a simple JSON file for external tools like BeatAC.
+$Save.beatac_export("profile1")
+```
+This writes a JSON export to `user://beatac_exports/` and makes integration easier.
+
+### �🖼 Screenshots
 Stored in user://screenshots/
 
 Automatically rotates oldest screenshots if limit is reached
